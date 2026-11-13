@@ -11,7 +11,8 @@
   doctor / status / apply --dry-run / apply / restart
   gate status / gate on / gate off
   revert / persona
-写入类操作前端有二次确认。restart 会关闭 WorkBuddy 进程（正在进行的会话随进程终止，属预期）。
+写入类操作前端有二次确认，执行后自动刷新状态徽章。
+restart 会关闭 WorkBuddy 进程（正在进行的会话随进程终止，属预期）。
 """
 from __future__ import annotations
 
@@ -73,80 +74,150 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>workbuddy破甲 · 控制面板</title>
 <style>
-  :root{--fg:#1f2328;--muted:#57606a;--line:#d0d7de;--bg:#fff;--soft:#f6f8fa;}
+  :root{
+    --bg:#f6f8fa; --panel:#ffffff; --line:#d8dee4; --line2:#c3cbd4;
+    --fg:#1f2328; --muted:#6e7781;
+    --green:#1a7f37; --green-bg:#dafbe1; --green-line:#a3d9b0;
+    --red:#cf222e; --red-line:#f0b8bf; --red-bg:#fff0f0;
+    --gray-bg:#eef1f4;
+    --term:#0d1117; --term-fg:#e6edf3; --term-head:#161b22; --term-green:#7ee787; --term-dim:#8b949e;
+  }
   *{box-sizing:border-box;}
   body{margin:0;background:var(--bg);color:var(--fg);
-       font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
-  header{padding:18px 24px 12px;border-bottom:1px solid var(--line);}
-  h1{margin:0;font-size:18px;font-weight:600;}
-  header p{margin:3px 0 0;color:var(--muted);font-size:12px;}
-  main{padding:16px 24px 24px;max-width:920px;}
-  .params{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 16px;}
-  .params label{font-size:12px;color:var(--muted);}
-  .params input{margin-top:4px;border:1px solid var(--line);border-radius:6px;
-                padding:5px 8px;font:12px ui-monospace,Consolas,monospace;width:300px;}
-  .group{margin:0 0 14px;}
-  .group h2{font-size:12px;font-weight:600;color:var(--muted);margin:0 0 8px;}
+       font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+       -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px;margin:28px auto 44px;padding:0 20px;}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+         box-shadow:0 1px 2px rgba(31,35,40,.06),0 10px 30px rgba(31,35,40,.05);}
+  header{padding:20px 24px 16px;border-bottom:1px solid var(--line);}
+  .brand{display:flex;align-items:center;gap:12px;}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--green);
+       box-shadow:0 0 0 4px var(--green-bg);flex:none;}
+  h1{margin:0;font-size:17px;font-weight:650;letter-spacing:.2px;}
+  .brand p{margin:1px 0 0;font-size:12px;color:var(--muted);}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0;align-items:center;}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:500;
+         padding:3px 11px;border-radius:999px;border:1px solid var(--line);
+         background:var(--gray-bg);color:#444c56;font-variant-numeric:tabular-nums;}
+  .badge.ok{background:var(--green-bg);border-color:var(--green-line);color:#116329;}
+  .badge.off{background:var(--panel);color:var(--muted);}
+  .badge.warn{background:var(--red-bg);border-color:var(--red-line);color:var(--red);}
+  .refresh{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--muted);
+           width:27px;height:27px;border-radius:7px;cursor:pointer;font-size:14px;line-height:1;}
+  .refresh:hover{border-color:var(--line2);color:var(--fg);background:#f3f4f6;}
+  .refresh.busy{animation:spin 1s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  main{padding:16px 24px 24px;}
+  .params{display:flex;gap:14px;flex-wrap:wrap;padding:2px 0 16px;border-bottom:1px solid var(--line);}
+  .field{flex:1;min-width:230px;}
+  .field label{font-size:12px;color:var(--muted);}
+  .field input{margin-top:5px;width:100%;border:1px solid var(--line);border-radius:7px;
+               padding:6px 10px;font:12px ui-monospace,Consolas,"Cascadia Mono",monospace;
+               background:var(--panel);color:var(--fg);}
+  .field input:focus{outline:2px solid rgba(9,105,218,.25);border-color:#0969da;}
+  .groups{padding:16px 0 4px;display:grid;gap:13px;}
+  .group{display:grid;grid-template-columns:66px 1fr;gap:10px;align-items:start;}
+  .group h2{margin:7px 0 0;font-size:12px;font-weight:600;color:var(--muted);}
   .row{display:flex;flex-wrap:wrap;gap:8px;}
-  button{appearance:none;border:1px solid var(--line);background:var(--soft);
-         color:var(--fg);padding:6px 14px;border-radius:6px;cursor:pointer;
-         font:inherit;font-size:13px;}
-  button:hover{background:#eef1f4;}
-  button:disabled{opacity:.55;cursor:default;}
-  button.primary{color:#1a7f37;border-color:#a3c9a8;}
-  button.primary:hover{background:#f0f7f1;}
-  button.danger{color:#cf222e;border-color:#d5a3a8;}
-  button.danger:hover{background:#fff0f0;}
-  #out{border:1px solid var(--line);border-radius:8px;background:var(--soft);
-       padding:12px 14px;min-height:220px;max-height:62vh;overflow:auto;
-       font:12px/1.55 ui-monospace,"Cascadia Mono",Consolas,monospace;
+  button.act{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--fg);
+             padding:0 14px;height:32px;border-radius:7px;cursor:pointer;font:500 13px/1 inherit;
+             transition:background .15s,border-color .15s;}
+  button.act:hover{background:#f3f4f6;border-color:var(--line2);}
+  button.act:active{background:#ebeeef;}
+  button.act:disabled{opacity:.45;cursor:default;}
+  button.act.primary{color:var(--green);border-color:#a3d9b0;}
+  button.act.primary:hover{background:#f2fff4;}
+  button.act.danger{color:var(--red);border-color:var(--red-line);}
+  button.act.danger:hover{background:var(--red-bg);}
+  .term{margin-top:16px;border:1px solid #2a3138;border-radius:10px;overflow:hidden;
+        box-shadow:0 6px 24px rgba(1,4,9,.20);}
+  .term-head{display:flex;justify-content:space-between;align-items:center;
+             background:var(--term-head);padding:7px 12px;}
+  .term-head span{font:11px ui-monospace,Consolas,monospace;color:var(--term-dim);letter-spacing:.5px;}
+  .term-clear{appearance:none;border:0;background:none;color:var(--term-dim);cursor:pointer;
+              font-size:11px;padding:3px 8px;border-radius:5px;}
+  .term-clear:hover{color:var(--term-fg);background:#21262d;}
+  #out{background:var(--term);color:var(--term-fg);min-height:240px;max-height:58vh;overflow:auto;
+       padding:12px 14px;margin:0;
+       font:12.5px/1.62 ui-monospace,"Cascadia Mono",Consolas,monospace;
        white-space:pre-wrap;word-break:break-all;}
-  .meta{color:var(--muted);}
+  #out .cmd{color:var(--term-green);}
+  #out .dim{color:var(--term-dim);}
+  #out .ok{color:var(--term-green);}
+  #out .fail{color:#ffa198;}
+  #out .sep{color:#30363d;}
+  footer{padding:11px 24px 16px;border-top:1px solid var(--line);
+         font-size:11.5px;color:var(--muted);}
 </style>
 </head>
 <body>
-<header>
-  <h1>workbuddy破甲 · 控制面板</h1>
-  <p>本机运行 · 仅监听 127.0.0.1 · 按钮直达 scripts/pojia.py（写入类有二次确认）</p>
-</header>
-<main>
-  <div class="params">
-    <div>
-      <label>安装目录（留空自动探测）</label><br>
-      <input id="install" placeholder="D:\\WorkBuddy" spellcheck="false">
-    </div>
-    <div>
-      <label>数据目录（留空用默认）</label><br>
-      <input id="data" placeholder="%USERPROFILE%\\.workbuddy" spellcheck="false">
-    </div>
+<div class="wrap">
+  <div class="panel">
+    <header>
+      <div class="brand">
+        <div class="dot"></div>
+        <div>
+          <h1>workbuddy破甲 · 控制面板</h1>
+          <p>本机运行 · 仅监听 127.0.0.1 · 按钮直达 scripts/pojia.py</p>
+        </div>
+      </div>
+      <div class="badges">
+        <span class="badge" id="b-L1">L1 模板 …</span>
+        <span class="badge" id="b-L2">L2 产品 …</span>
+        <span class="badge" id="b-L3">L3 闸门 …</span>
+        <span class="badge" id="b-L6">L6 记忆 …</span>
+        <button class="refresh" id="refresh" title="刷新状态">↻</button>
+      </div>
+    </header>
+    <main>
+      <div class="params">
+        <div class="field">
+          <label>安装目录（留空自动探测）</label>
+          <input id="install" placeholder="D:\\WorkBuddy" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>数据目录（留空用默认）</label>
+          <input id="data" placeholder="%USERPROFILE%\\.workbuddy" spellcheck="false">
+        </div>
+      </div>
+      <div class="groups">
+        <div class="group">
+          <h2>常规</h2>
+          <div class="row">
+            <button class="act" data-act="doctor">体检</button>
+            <button class="act" data-act="status">状态</button>
+            <button class="act" data-act="dry">演练（不写盘）</button>
+            <button class="act primary" data-act="apply">写入补丁</button>
+            <button class="act primary" data-act="restart">关进程 → 写入 → 重启</button>
+          </div>
+        </div>
+        <div class="group">
+          <h2>L3 闸门</h2>
+          <div class="row">
+            <button class="act" data-act="gate-status">闸门状态</button>
+            <button class="act danger" data-act="gate-on">gate on（全局）</button>
+            <button class="act" data-act="gate-off">gate off</button>
+          </div>
+        </div>
+        <div class="group">
+          <h2>维护</h2>
+          <div class="row">
+            <button class="act" data-act="persona">人格文本</button>
+            <button class="act danger" data-act="revert">全部还原</button>
+          </div>
+        </div>
+      </div>
+      <div class="term">
+        <div class="term-head">
+          <span>pojia.py · stdout</span>
+          <button class="term-clear" id="clear">清空</button>
+        </div>
+        <pre id="out"><span class="dim">就绪。正在体检…</span></pre>
+      </div>
+    </main>
+    <footer>写入类操作有二次确认 · restart / gate 会重启 WorkBuddy 进程（正在进行的会话随进程终止） · 幂等写入，自动备份 .pojia.bak</footer>
   </div>
-  <div class="group">
-    <h2>常规</h2>
-    <div class="row">
-      <button data-act="doctor">体检</button>
-      <button data-act="status">状态</button>
-      <button data-act="dry">演练（不写盘）</button>
-      <button data-act="apply" class="primary">写入补丁</button>
-      <button data-act="restart" class="primary">关进程 → 写入 → 重启</button>
-    </div>
-  </div>
-  <div class="group">
-    <h2>L3 命令闸门（全局，重启后生效）</h2>
-    <div class="row">
-      <button data-act="gate-status">闸门状态</button>
-      <button data-act="gate-on" class="danger">gate on</button>
-      <button data-act="gate-off">gate off</button>
-    </div>
-  </div>
-  <div class="group">
-    <h2>维护</h2>
-    <div class="row">
-      <button data-act="persona">人格文本</button>
-      <button data-act="revert" class="danger">全部还原（.pojia.bak）</button>
-    </div>
-  </div>
-  <div id="out"><span class="meta">就绪。点上面任一按钮执行，输出显示在这里。</span></div>
-</main>
+</div>
 <script>
   var OUT = document.getElementById('out');
   var CONFIRM = {
@@ -156,37 +227,106 @@ PAGE = """<!doctype html>
     'gate-on':  '确认开启 L3 闸门？全局放行，需重启 WorkBuddy 生效。',
     'gate-off': '确认关闭 L3 闸门并还原 mjs 原版？'
   };
-  function log(line){
-    OUT.textContent += line + '\\n';
-    OUT.scrollTop = OUT.scrollHeight;
+  var WRITE_ACTS = ['apply', 'restart', 'revert', 'gate-on', 'gate-off'];
+
+  function esc(s){
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
   }
-  document.querySelectorAll('button[data-act]').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      var act = btn.dataset.act;
-      if (CONFIRM[act] && !confirm(CONFIRM[act])) return;
-      var t = new Date().toLocaleTimeString();
-      OUT.textContent = '';
-      log('[' + t + '] $ pojia ' + act + '  …运行中');
-      document.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
-      fetch('/api/run', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          action: act,
-          install: document.getElementById('install').value,
-          data: document.getElementById('data').value
-        })
-      }).then(function(r){ return r.json(); }).then(function(j){
-        OUT.textContent = '';
-        log('[' + t + '] $ pojia ' + act + '  → 退出码 ' + j.code + (j.ok ? '  ✓' : '  ✗'));
-        log('──────────────────────────');
-        log(j.output || '(无输出)');
-      }).catch(function(e){
-        OUT.textContent = '';
-        log('请求失败：' + e);
-      }).finally(function(){
-        document.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
-      });
+  function scrollDown(){ OUT.scrollTop = OUT.scrollHeight; }
+  function setBusy(b){
+    document.querySelectorAll('button.act').forEach(function(x){ x.disabled = b; });
+    document.getElementById('refresh').classList.toggle('busy', b);
+  }
+  function setBadge(id, text, cls){
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.className = 'badge' + (cls ? ' ' + cls : '');
+  }
+
+  /* 解析 pojia status 输出 → 徽章（不使用正则，避免转义问题） */
+  function grabNum(line){
+    var i = line.indexOf(':');
+    if (i < 0) return '';
+    var s = line.slice(i + 1).trim();
+    var sp = s.indexOf(' ');
+    return sp > 0 ? s.slice(0, sp) : s;
+  }
+  function parseStatus(text){
+    var lines = text.split('\\n');
+    for (var i = 0; i < lines.length; i++){
+      var L = lines[i];
+      if (L.indexOf('L1') === 0){
+        var v = grabNum(L), p = v.split('/');
+        setBadge('b-L1', 'L1 模板 ' + v, (p.length === 2 && p[0] === p[1] && p[1] !== '0') ? 'ok' : '');
+      } else if (L.indexOf('L2') === 0){
+        var v = grabNum(L), p = v.split('/');
+        setBadge('b-L2', 'L2 产品 ' + v, (p.length === 2 && p[0] === p[1] && p[1] !== '0') ? 'ok' : '');
+      } else if (L.indexOf('L3') === 0){
+        var on = L.indexOf('开启') >= 0;
+        setBadge('b-L3', 'L3 闸门 ' + (on ? '开启' : '关闭'), on ? 'warn' : 'off');
+      } else if (L.indexOf('L6') === 0){
+        setBadge('b-L6', 'L6 记忆 ' + grabNum(L), 'off');
+      }
+    }
+  }
+
+  function post(action){
+    return fetch('/api/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: action,
+        install: document.getElementById('install').value,
+        data: document.getElementById('data').value
+      })
+    }).then(function(r){ return r.json(); });
+  }
+
+  function refreshBadges(){
+    var btn = document.getElementById('refresh');
+    btn.classList.add('busy');
+    return post('status').then(function(j){
+      parseStatus(j.output || '');
+      btn.classList.remove('busy');
+    }).catch(function(){ btn.classList.remove('busy'); });
+  }
+
+  function run(act){
+    if (CONFIRM[act] && !confirm(CONFIRM[act])) return;
+    var t = new Date().toLocaleTimeString();
+    OUT.innerHTML = '';
+    OUT.innerHTML += '<span class="dim">[' + t + ']</span> <span class="cmd">$ pojia ' + esc(act) + '</span> <span class="dim">…运行中</span>\\n';
+    scrollDown();
+    setBusy(true);
+    post(act).then(function(j){
+      OUT.innerHTML = '';
+      OUT.innerHTML += '<span class="dim">[' + t + ']</span> <span class="cmd">$ pojia ' + esc(act) + '</span>'
+                     + ' <span class="' + (j.ok ? 'ok' : 'fail') + '">→ 退出码 ' + j.code + (j.ok ? '  ✓' : '  ✗') + '</span>\\n';
+      OUT.innerHTML += '<span class="sep">──────────────────────────────</span>\\n';
+      OUT.innerHTML += esc(j.output || '(无输出)') + '\\n';
+      scrollDown();
+    }).catch(function(e){
+      OUT.innerHTML = '';
+      OUT.innerHTML += '<span class="fail">请求失败：' + esc(String(e)) + '</span>\\n';
+    }).finally(function(){
+      setBusy(false);
+      if (WRITE_ACTS.indexOf(act) >= 0) setTimeout(refreshBadges, 600);
+    });
+  }
+
+  document.querySelectorAll('button.act').forEach(function(btn){
+    btn.addEventListener('click', function(){ run(btn.dataset.act); });
+  });
+  document.getElementById('refresh').addEventListener('click', refreshBadges);
+  document.getElementById('clear').addEventListener('click', function(){
+    OUT.innerHTML = '<span class="dim">（已清空）</span>\\n';
+  });
+
+  window.addEventListener('load', function(){
+    refreshBadges().then(function(){
+      OUT.innerHTML = '<span class="dim">就绪。状态徽章已刷新，点上面任一按钮执行。</span>\\n';
     });
   });
 </script>
@@ -253,7 +393,7 @@ def main() -> int:
     print(f"workbuddy破甲 控制面板已启动: {url}")
     print("Ctrl+C 停止。写入类命令有二次确认；restart 会关闭 WorkBuddy 进程。")
     if not a.no_open:
-        threading_open(url)
+        open_later(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -263,7 +403,7 @@ def main() -> int:
     return 0
 
 
-def threading_open(url: str):
+def open_later(url: str):
     import threading
     threading.Timer(0.3, lambda: webbrowser.open(url)).start()
 
