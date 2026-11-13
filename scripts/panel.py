@@ -7,11 +7,15 @@
   python scripts/panel.py --port 8301
   python scripts/panel.py --no-open      # 不自动开浏览器（调试用）
 
-面板按钮驱动 scripts/pojia.py 的全部子命令：
-  doctor / status / check / apply --dry-run / apply / restart
-  gate status / gate on / gate off / gate off --restart
-  revert / persona
-附加能力：执行历史（localStorage）、体检环境摘要、--cloudmem 选项、数字快捷键 1-9。
+能力分两块：
+  一、pojia 命令面板：doctor / status / check / apply --dry-run / apply / restart
+     gate status / gate on / gate off / gate off --restart / revert / persona
+     附：状态徽章（自动体检）、执行历史（localStorage）、体检环境摘要、
+         --cloudmem 选项、数字快捷键 1-9。
+  二、通用 skill 安装器（内容中性，只做文件搬运）：
+     列出 ~/.workbuddy/skills/ 已装 skill；从本地 zip 或目录安装
+     （自动定位含 SKILL.md 的根、防 zip 路径穿越、同名整体替换）；
+     卸载（仅允许删 skills 根内的 skill 目录，带确认）。
 写入类操作前端有二次确认，执行后自动刷新状态徽章。
 restart 会关闭 WorkBuddy 进程（正在进行的会话随进程终止，属预期）。
 """
@@ -21,15 +25,23 @@ import argparse
 import http.server
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import webbrowser
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
 SCRIPTS = Path(__file__).resolve().parent
 POJIA = SCRIPTS / "pojia.py"
 ROOT = SCRIPTS.parent
+SKILLS_ROOT = Path.home() / ".workbuddy" / "skills"
+
+# skill 目录名清洗：仅允许字母数字._-，其余替换为 -
+NAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 # 面板按钮 → pojia.py 参数（白名单，未列出的命令不接受）
 ACTIONS: dict[str, list[str]] = {
@@ -47,12 +59,11 @@ ACTIONS: dict[str, list[str]] = {
     "gate-off-restart": ["gate", "off", "--restart"],
 }
 
-# --cloudmem 只对写盘类命令有意义
 CLOUDMEM_APPLICABLE = {"apply", "restart"}
 
 
+# ---------------------------------------------------------------- pojia 命令
 def run_action(action: str, install: str, data: str, cloudmem: bool = False) -> dict:
-    """同步执行 pojia.py 子命令，捕获 stdout/stderr 返回 JSON。"""
     args = [sys.executable, str(POJIA), *ACTIONS[action]]
     if install:
         args += ["-i", install]
@@ -73,6 +84,115 @@ def run_action(action: str, install: str, data: str, cloudmem: bool = False) -> 
         return {"ok": p.returncode == 0, "code": p.returncode, "output": out.strip()}
     except subprocess.TimeoutExpired:
         return {"ok": False, "code": -1, "output": "命令超时（600 秒）"}
+
+
+# ---------------------------------------------------------------- skill 安装器
+def read_skill_meta(md: Path) -> tuple[str, str]:
+    """读 SKILL.md frontmatter 的 name / description（缺失则空串）。"""
+    name, desc = "", ""
+    try:
+        text = md.read_text(encoding="utf-8", errors="replace")[:6000]
+    except OSError:
+        return name, desc
+    in_fm = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s == "---":
+            in_fm = not in_fm
+            if not in_fm and (name or desc):
+                break
+            continue
+        if in_fm:
+            if s.startswith("name:"):
+                name = s[5:].strip().strip("'\"")
+            elif s.startswith("description:"):
+                desc = s[12:].strip().strip("'\"")
+    return name, desc
+
+
+def list_skills() -> list[dict]:
+    out: list[dict] = []
+    if SKILLS_ROOT.is_dir():
+        for p in sorted(SKILLS_ROOT.iterdir()):
+            if p.is_dir() and (p / "SKILL.md").is_file():
+                meta_name, desc = read_skill_meta(p / "SKILL.md")
+                out.append({"name": p.name, "skill": meta_name or p.name, "desc": (desc or "")[:120]})
+    return out
+
+
+def find_skill_root(base: Path) -> tuple[Path | None, str]:
+    """在 base 下定位含 SKILL.md 的根：base 本身，或其唯一子目录。"""
+    if (base / "SKILL.md").is_file():
+        return base, ""
+    cands = [d for d in base.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()]
+    if len(cands) == 1:
+        return cands[0], ""
+    if len(cands) > 1:
+        names = ", ".join(d.name for d in cands[:8])
+        return None, f"发现多个 skill 根（{names}），请指向更具体的子目录"
+    return None, "未找到 SKILL.md（skill 根目录必须包含 SKILL.md）"
+
+
+def install_skill(source: str) -> dict:
+    """source：本机 zip 文件或目录。定位 skill 根后复制到 SKILLS_ROOT。"""
+    src = Path(source).expanduser()
+    if not src.exists():
+        return {"ok": False, "output": f"路径不存在: {src}"}
+    tmp: Path | None = None
+    try:
+        if src.is_file():
+            if src.suffix.lower() != ".zip":
+                return {"ok": False, "output": "仅支持 .zip 文件或目录"}
+            tmp = Path(tempfile.mkdtemp(prefix="pojia-skill-"))
+            try:
+                with zipfile.ZipFile(src) as z:
+                    troot = str(tmp.resolve())
+                    for member in z.namelist():
+                        # 防路径穿越：成员 resolve 后必须落在解压目录内
+                        mp = (tmp / member).resolve()
+                        if not str(mp).startswith(troot + os.sep) and str(mp) != troot:
+                            return {"ok": False, "output": f"zip 内含非法路径，拒绝安装: {member}"}
+                    z.extractall(tmp)
+            except zipfile.BadZipFile:
+                return {"ok": False, "output": "不是有效的 zip 文件"}
+            root, why = find_skill_root(tmp)
+        elif src.is_dir():
+            root, why = find_skill_root(src)
+        else:
+            return {"ok": False, "output": "既不是 zip 也不是目录"}
+
+        if root is None:
+            return {"ok": False, "output": why}
+
+        target_name = NAME_SANITIZE.sub("-", root.name).strip("-.") or "skill"
+        target = SKILLS_ROOT / target_name
+        SKILLS_ROOT.mkdir(parents=True, exist_ok=True)
+        replaced = target.exists()
+        if replaced:
+            shutil.rmtree(target)
+        shutil.copytree(root, target)
+        note = f"已安装 {target_name} → {target}"
+        if replaced:
+            note += "（同名旧版已整体替换）"
+        return {"ok": True, "output": note}
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def uninstall_skill(name: str) -> dict:
+    target_name = NAME_SANITIZE.sub("-", name).strip("-.")
+    if not target_name:
+        return {"ok": False, "output": "无效名称"}
+    target = (SKILLS_ROOT / target_name).resolve()
+    skills_root = SKILLS_ROOT.resolve()
+    # 双保险：resolve 后必须严格位于 skills 根内
+    if not str(target).startswith(str(skills_root) + os.sep):
+        return {"ok": False, "output": "非法目标（拒绝越出技能目录）"}
+    if not target.is_dir() or not (target / "SKILL.md").is_file():
+        return {"ok": False, "output": f"不是 skill 目录: {target_name}"}
+    shutil.rmtree(target)
+    return {"ok": True, "output": f"已卸载 {target_name}"}
 
 
 PAGE = """<!doctype html>
@@ -134,7 +254,7 @@ PAGE = """<!doctype html>
   .row{display:flex;flex-wrap:wrap;gap:8px;}
   button.act{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--fg);
              padding:0 14px;height:32px;border-radius:7px;cursor:pointer;font:500 13px/1 inherit;
-             transition:background .15s,border-color .15s;position:relative;}
+             transition:background .15s,border-color .15s;}
   button.act:hover{background:#f3f4f6;border-color:var(--line2);}
   button.act:active{background:#ebeeef;}
   button.act:disabled{opacity:.45;cursor:default;}
@@ -142,9 +262,26 @@ PAGE = """<!doctype html>
   button.act.primary:hover{background:#f2fff4;}
   button.act.danger{color:var(--red);border-color:var(--red-line);}
   button.act.danger:hover{background:var(--red-bg);}
-  button.act .k{position:absolute;top:-7px;right:-6px;font:600 9px/1 ui-monospace,monospace;
-                color:var(--muted);background:var(--panel);border:1px solid var(--line);
-                border-radius:4px;padding:1px 3px;display:none;}
+  /* ---- 技能包区块 ---- */
+  .skillbox{margin-top:14px;border:1px solid var(--line);border-radius:10px;
+            padding:12px 14px 14px;background:#fcfdfe;}
+  .skillhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+  .skillhead h2{margin:0;font-size:12px;font-weight:600;color:var(--muted);}
+  #skilllist{list-style:none;margin:0 0 10px;padding:0;display:grid;gap:4px;}
+  #skilllist li{display:flex;align-items:center;gap:10px;font-size:12.5px;
+                padding:5px 8px;border-radius:6px;}
+  #skilllist li:hover{background:var(--gray-bg);}
+  #skilllist li code{font:12px ui-monospace,Consolas,monospace;color:var(--fg);flex:none;}
+  #skilllist .sdesc{color:var(--muted);flex:1;min-width:0;overflow:hidden;
+                    text-overflow:ellipsis;white-space:nowrap;}
+  #skilllist .rm{appearance:none;border:1px solid var(--red-line);background:var(--panel);
+                 color:var(--red);font-size:11px;padding:2px 10px;border-radius:6px;cursor:pointer;flex:none;}
+  #skilllist .rm:hover{background:var(--red-bg);}
+  .skillrow{display:flex;gap:8px;}
+  .skillrow input{flex:1;border:1px solid var(--line);border-radius:7px;padding:6px 10px;
+                  font:12px ui-monospace,Consolas,monospace;}
+  .skillrow input:focus{outline:2px solid rgba(9,105,218,.25);border-color:#0969da;}
+  .skillbox .hint{margin:8px 0 0;font-size:11.5px;color:var(--muted);}
   .term{margin-top:16px;border:1px solid #2a3138;border-radius:10px;overflow:hidden;
         box-shadow:0 6px 24px rgba(1,4,9,.20);}
   .term-head{display:flex;align-items:center;gap:8px;
@@ -181,7 +318,7 @@ PAGE = """<!doctype html>
         <div class="dot"></div>
         <div>
           <h1>workbuddy破甲 · 控制面板</h1>
-          <p>本机运行 · 仅监听 127.0.0.1 · 按钮直达 scripts/pojia.py</p>
+          <p>本机运行 · 仅监听 127.0.0.1 · pojia 命令 + skill 安装器</p>
         </div>
       </div>
       <div class="badges">
@@ -236,9 +373,21 @@ PAGE = """<!doctype html>
           </div>
         </div>
       </div>
+      <div class="skillbox">
+        <div class="skillhead">
+          <h2>技能包（~/.workbuddy/skills）</h2>
+          <button class="refresh" id="skill-refresh" title="刷新列表">↻</button>
+        </div>
+        <ul id="skilllist"><li><span class="sdesc">加载中…</span></li></ul>
+        <div class="skillrow">
+          <input id="skill-src" placeholder="本机 skill 包路径（.zip 或目录，根须含 SKILL.md）" spellcheck="false">
+          <button class="act" id="skill-install">安装</button>
+        </div>
+        <p class="hint">安装 = 复制到 %USERPROFILE%\\.workbuddy\\skills\\，同名整体替换，新会话生效；卸载会删除整个 skill 目录（有确认）。</p>
+      </div>
       <div class="term">
         <div class="term-head">
-          <span>pojia.py · stdout</span>
+          <span>stdout</span>
           <div id="hist"></div>
           <button class="term-clear" id="clear">清空</button>
         </div>
@@ -262,18 +411,26 @@ PAGE = """<!doctype html>
 
   function esc(s){
     var d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = String(s);
     return d.innerHTML;
   }
   function scrollDown(){ OUT.scrollTop = OUT.scrollHeight; }
   function setBusy(b){
-    document.querySelectorAll('button.act').forEach(function(x){ x.disabled = b; });
+    document.querySelectorAll('button.act[data-act]').forEach(function(x){ x.disabled = b; });
     document.getElementById('refresh').classList.toggle('busy', b);
   }
   function setBadge(id, text, cls){
     var el = document.getElementById(id);
     el.textContent = text;
     el.className = 'badge' + (cls ? ' ' + cls : '');
+  }
+  function printResult(t, tag, j){
+    OUT.innerHTML = '';
+    OUT.innerHTML += '<span class="dim">[' + t + ']</span> <span class="cmd">' + esc(tag) + '</span>'
+                   + ' <span class="' + (j.ok ? 'ok' : 'fail') + '">→ ' + (j.code !== undefined ? '退出码 ' + j.code + (j.ok ? '  ✓' : '  ✗') : (j.ok ? '✓' : '✗')) + '</span>\\n';
+    OUT.innerHTML += '<span class="sep">──────────────────────────────</span>\\n';
+    OUT.innerHTML += esc(j.output || '(无输出)') + '\\n';
+    scrollDown();
   }
 
   /* ---------- 执行历史（localStorage，最近 8 条） ---------- */
@@ -381,12 +538,7 @@ PAGE = """<!doctype html>
     scrollDown();
     setBusy(true);
     post(act).then(function(j){
-      OUT.innerHTML = '';
-      OUT.innerHTML += '<span class="dim">[' + t + ']</span> <span class="cmd">$ pojia ' + esc(act) + '</span>'
-                     + ' <span class="' + (j.ok ? 'ok' : 'fail') + '">→ 退出码 ' + j.code + (j.ok ? '  ✓' : '  ✗') + '</span>\\n';
-      OUT.innerHTML += '<span class="sep">──────────────────────────────</span>\\n';
-      OUT.innerHTML += esc(j.output || '(无输出)') + '\\n';
-      scrollDown();
+      printResult(t, '$ pojia ' + act, j);
       HIST.unshift({t: t, act: act, code: j.code, ok: j.ok, output: (j.output || '').slice(0, 6000)});
       if (HIST.length > 8) HIST.length = 8;
       saveHist();
@@ -401,7 +553,58 @@ PAGE = """<!doctype html>
     });
   }
 
-  document.querySelectorAll('button.act').forEach(function(btn){
+  /* ---------- 技能包管理 ---------- */
+  function loadSkills(){
+    fetch('/api/skills').then(function(r){ return r.json(); }).then(function(j){
+      var ul = document.getElementById('skilllist');
+      if (!j.ok || !j.skills || !j.skills.length){
+        ul.innerHTML = '<li><span class="sdesc">（暂无已装 skill）</span></li>';
+        return;
+      }
+      ul.innerHTML = j.skills.map(function(s){
+        return '<li><code>' + esc(s.name) + '</code>'
+             + '<span class="sdesc">' + esc(s.desc || s.skill || '') + '</span>'
+             + '<button class="rm" data-name="' + esc(s.name) + '" title="卸载">卸载</button></li>';
+      }).join('');
+    }).catch(function(){
+      document.getElementById('skilllist').innerHTML =
+        '<li><span class="sdesc">列表加载失败</span></li>';
+    });
+  }
+  function installSkill(){
+    var src = document.getElementById('skill-src').value.trim();
+    if (!src){ alert('先填 skill 包路径（.zip 或目录）'); return; }
+    if (!confirm('安装到 %USERPROFILE%\\.workbuddy\\skills\\ ？同名技能将被整体替换。')) return;
+    var t = new Date().toLocaleTimeString();
+    fetch('/api/skills/install', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: src})
+    }).then(function(r){ return r.json(); }).then(function(j){
+      printResult(t, '$ skill install ' + src, j);
+      loadSkills();
+    }).catch(function(e){ alert('安装请求失败：' + e); });
+  }
+  document.getElementById('skilllist').addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.rm') : null;
+    if (!b) return;
+    var name = b.getAttribute('data-name');
+    if (!confirm('确认卸载技能「' + name + '」？将删除整个 skill 目录（新会话起失效）。')) return;
+    var t = new Date().toLocaleTimeString();
+    fetch('/api/skills/uninstall', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name})
+    }).then(function(r){ return r.json(); }).then(function(j){
+      printResult(t, '$ skill uninstall ' + name, j);
+      loadSkills();
+    }).catch(function(e){ alert('卸载请求失败：' + e); });
+  });
+  document.getElementById('skill-install').addEventListener('click', installSkill);
+  document.getElementById('skill-refresh').addEventListener('click', loadSkills);
+
+  /* ---------- 事件绑定 ---------- */
+  document.querySelectorAll('button.act[data-act]').forEach(function(btn){
     btn.addEventListener('click', function(){ run(btn.dataset.act); });
   });
   document.getElementById('refresh').addEventListener('click', refreshBadges);
@@ -414,11 +617,12 @@ PAGE = """<!doctype html>
     if (e.target.tagName === 'INPUT') return;
     var n = parseInt(e.key, 10);
     if (isNaN(n) || n < 1 || n > 9) return;
-    var btns = document.querySelectorAll('button.act');
+    var btns = document.querySelectorAll('button.act[data-act]');
     if (btns[n - 1] && !btns[n - 1].disabled) run(btns[n - 1].dataset.act);
   });
 
   renderHist();
+  loadSkills();
   window.addEventListener('load', function(){
     refreshBadges().then(function(){
       OUT.innerHTML = '<span class="dim">就绪。状态徽章已刷新，点上面任一按钮执行，快捷键 1-9。</span>\\n';
@@ -442,35 +646,55 @@ class Panel(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_json(self, code: int, obj: dict):
+        self._send(code, json.dumps(obj), "application/json")
+
+    def _read_json(self) -> dict:
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n).decode("utf-8"))
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
             self._send(200, PAGE, "text/html")
         elif path == "/api/health":
-            self._send(200, json.dumps({"ok": True}), "application/json")
+            self._send_json(200, {"ok": True})
+        elif path == "/api/skills":
+            try:
+                self._send_json(200, {"ok": True, "skills": list_skills()})
+            except Exception as e:  # noqa: BLE001
+                self._send_json(500, {"ok": False, "output": str(e)})
         else:
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/run":
-            self._send(404, "not found", "text/plain")
-            return
-        n = int(self.headers.get("Content-Length") or 0)
+        path = urlparse(self.path).path
         try:
-            req = json.loads(self.rfile.read(n).decode("utf-8"))
-            action = str(req.get("action", ""))
-            if action not in ACTIONS:
-                self._send(400, json.dumps({"ok": False, "code": -1, "output": "未知操作: " + action}), "application/json")
-                return
-            result = run_action(
-                action,
-                str(req.get("install", "")).strip(),
-                str(req.get("data", "")).strip(),
-                bool(req.get("cloudmem", False)),
-            )
-            self._send(200, json.dumps(result), "application/json")
+            if path == "/api/run":
+                req = self._read_json()
+                action = str(req.get("action", ""))
+                if action not in ACTIONS:
+                    self._send_json(400, {"ok": False, "code": -1, "output": "未知操作: " + action})
+                    return
+                result = run_action(
+                    action,
+                    str(req.get("install", "")).strip(),
+                    str(req.get("data", "")).strip(),
+                    bool(req.get("cloudmem", False)),
+                )
+                self._send_json(200, result)
+            elif path == "/api/skills/install":
+                req = self._read_json()
+                result = install_skill(str(req.get("source", "")).strip())
+                self._send_json(200, result)
+            elif path == "/api/skills/uninstall":
+                req = self._read_json()
+                result = uninstall_skill(str(req.get("name", "")).strip())
+                self._send_json(200, result)
+            else:
+                self._send(404, "not found", "text/plain")
         except Exception as e:  # noqa: BLE001
-            self._send(500, json.dumps({"ok": False, "code": -1, "output": "面板内部错误: " + str(e)}), "application/json")
+            self._send_json(500, {"ok": False, "code": -1, "output": "面板内部错误: " + str(e)})
 
 
 def main() -> int:
