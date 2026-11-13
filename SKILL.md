@@ -108,6 +108,7 @@ python %USERPROFILE%\.dsh\skills\workbuddy-pojia\scripts\pojia.py revert
 ## 文件
 
 - `scripts/pojia.py` —— 补丁器（doctor/status/apply/check/revert/persona/restart/gate）
+- `scripts/panel.py` —— 本地控制面板（可选，纯标准库，只监听 127.0.0.1，按钮驱动全部子命令，写入类有二次确认）
 - `persona/persona.md` —— 门控版破甲人格，`--cloudmem` 时写入云记忆
 
 ## 设计说明（为什么不默认开）
