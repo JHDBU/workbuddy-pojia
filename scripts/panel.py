@@ -8,9 +8,10 @@
   python scripts/panel.py --no-open      # 不自动开浏览器（调试用）
 
 面板按钮驱动 scripts/pojia.py 的全部子命令：
-  doctor / status / apply --dry-run / apply / restart
-  gate status / gate on / gate off
+  doctor / status / check / apply --dry-run / apply / restart
+  gate status / gate on / gate off / gate off --restart
   revert / persona
+附加能力：执行历史（localStorage）、体检环境摘要、--cloudmem 选项、数字快捷键 1-9。
 写入类操作前端有二次确认，执行后自动刷新状态徽章。
 restart 会关闭 WorkBuddy 进程（正在进行的会话随进程终止，属预期）。
 """
@@ -32,26 +33,33 @@ ROOT = SCRIPTS.parent
 
 # 面板按钮 → pojia.py 参数（白名单，未列出的命令不接受）
 ACTIONS: dict[str, list[str]] = {
-    "doctor":      ["doctor"],
-    "status":      ["status"],
-    "dry":         ["apply", "--dry-run"],
-    "apply":       ["apply"],
-    "restart":     ["restart"],
-    "revert":      ["revert"],
-    "persona":     ["persona"],
-    "gate-status": ["gate", "status"],
-    "gate-on":     ["gate", "on"],
-    "gate-off":    ["gate", "off"],
+    "doctor":           ["doctor"],
+    "status":           ["status"],
+    "check":            ["check"],
+    "dry":              ["apply", "--dry-run"],
+    "apply":            ["apply"],
+    "restart":          ["restart"],
+    "revert":           ["revert"],
+    "persona":          ["persona"],
+    "gate-status":      ["gate", "status"],
+    "gate-on":          ["gate", "on"],
+    "gate-off":         ["gate", "off"],
+    "gate-off-restart": ["gate", "off", "--restart"],
 }
 
+# --cloudmem 只对写盘类命令有意义
+CLOUDMEM_APPLICABLE = {"apply", "restart"}
 
-def run_action(action: str, install: str, data: str) -> dict:
+
+def run_action(action: str, install: str, data: str, cloudmem: bool = False) -> dict:
     """同步执行 pojia.py 子命令，捕获 stdout/stderr 返回 JSON。"""
     args = [sys.executable, str(POJIA), *ACTIONS[action]]
     if install:
         args += ["-i", install]
     if data:
         args += ["-d", data]
+    if cloudmem and action in CLOUDMEM_APPLICABLE:
+        args += ["--cloudmem"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     try:
         p = subprocess.run(
@@ -102,26 +110,31 @@ PAGE = """<!doctype html>
   .badge.ok{background:var(--green-bg);border-color:var(--green-line);color:#116329;}
   .badge.off{background:var(--panel);color:var(--muted);}
   .badge.warn{background:var(--red-bg);border-color:var(--red-line);color:var(--red);}
+  .envline{margin-top:9px;font-size:12px;color:var(--muted);display:none;
+           font-variant-numeric:tabular-nums;}
   .refresh{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--muted);
            width:27px;height:27px;border-radius:7px;cursor:pointer;font-size:14px;line-height:1;}
   .refresh:hover{border-color:var(--line2);color:var(--fg);background:#f3f4f6;}
   .refresh.busy{animation:spin 1s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
   main{padding:16px 24px 24px;}
-  .params{display:flex;gap:14px;flex-wrap:wrap;padding:2px 0 16px;border-bottom:1px solid var(--line);}
+  .params{display:flex;gap:14px;flex-wrap:wrap;padding:2px 0 14px;border-bottom:1px solid var(--line);}
   .field{flex:1;min-width:230px;}
   .field label{font-size:12px;color:var(--muted);}
   .field input{margin-top:5px;width:100%;border:1px solid var(--line);border-radius:7px;
                padding:6px 10px;font:12px ui-monospace,Consolas,"Cascadia Mono",monospace;
                background:var(--panel);color:var(--fg);}
   .field input:focus{outline:2px solid rgba(9,105,218,.25);border-color:#0969da;}
+  .check{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+         cursor:pointer;user-select:none;padding-top:22px;flex:none;}
+  .check input{accent-color:var(--green);width:14px;height:14px;cursor:pointer;margin:0;}
   .groups{padding:16px 0 4px;display:grid;gap:13px;}
   .group{display:grid;grid-template-columns:66px 1fr;gap:10px;align-items:start;}
   .group h2{margin:7px 0 0;font-size:12px;font-weight:600;color:var(--muted);}
   .row{display:flex;flex-wrap:wrap;gap:8px;}
   button.act{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--fg);
              padding:0 14px;height:32px;border-radius:7px;cursor:pointer;font:500 13px/1 inherit;
-             transition:background .15s,border-color .15s;}
+             transition:background .15s,border-color .15s;position:relative;}
   button.act:hover{background:#f3f4f6;border-color:var(--line2);}
   button.act:active{background:#ebeeef;}
   button.act:disabled{opacity:.45;cursor:default;}
@@ -129,13 +142,21 @@ PAGE = """<!doctype html>
   button.act.primary:hover{background:#f2fff4;}
   button.act.danger{color:var(--red);border-color:var(--red-line);}
   button.act.danger:hover{background:var(--red-bg);}
+  button.act .k{position:absolute;top:-7px;right:-6px;font:600 9px/1 ui-monospace,monospace;
+                color:var(--muted);background:var(--panel);border:1px solid var(--line);
+                border-radius:4px;padding:1px 3px;display:none;}
   .term{margin-top:16px;border:1px solid #2a3138;border-radius:10px;overflow:hidden;
         box-shadow:0 6px 24px rgba(1,4,9,.20);}
-  .term-head{display:flex;justify-content:space-between;align-items:center;
+  .term-head{display:flex;align-items:center;gap:8px;
              background:var(--term-head);padding:7px 12px;}
-  .term-head span{font:11px ui-monospace,Consolas,monospace;color:var(--term-dim);letter-spacing:.5px;}
+  .term-head>span{font:11px ui-monospace,Consolas,monospace;color:var(--term-dim);
+                  letter-spacing:.5px;flex:none;}
+  #hist{display:flex;gap:6px;flex-wrap:wrap;flex:1;justify-content:flex-end;min-height:0;}
+  .hpill{appearance:none;border:1px solid #30363d;background:#21262d;color:var(--term-dim);
+         font:11px ui-monospace,Consolas,monospace;padding:2px 9px;border-radius:999px;cursor:pointer;}
+  .hpill:hover{color:var(--term-fg);border-color:#8b949e;}
   .term-clear{appearance:none;border:0;background:none;color:var(--term-dim);cursor:pointer;
-              font-size:11px;padding:3px 8px;border-radius:5px;}
+              font-size:11px;padding:3px 8px;border-radius:5px;flex:none;}
   .term-clear:hover{color:var(--term-fg);background:#21262d;}
   #out{background:var(--term);color:var(--term-fg);min-height:240px;max-height:58vh;overflow:auto;
        padding:12px 14px;margin:0;
@@ -148,6 +169,8 @@ PAGE = """<!doctype html>
   #out .sep{color:#30363d;}
   footer{padding:11px 24px 16px;border-top:1px solid var(--line);
          font-size:11.5px;color:var(--muted);}
+  kbd{font:10px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px;
+      padding:0 4px;background:var(--gray-bg);}
 </style>
 </head>
 <body>
@@ -168,6 +191,7 @@ PAGE = """<!doctype html>
         <span class="badge" id="b-L6">L6 记忆 …</span>
         <button class="refresh" id="refresh" title="刷新状态">↻</button>
       </div>
+      <div class="envline" id="envline"></div>
     </header>
     <main>
       <div class="params">
@@ -179,6 +203,9 @@ PAGE = """<!doctype html>
           <label>数据目录（留空用默认）</label>
           <input id="data" placeholder="%USERPROFILE%\\.workbuddy" spellcheck="false">
         </div>
+        <label class="check" title="对应 --cloudmem">
+          <input type="checkbox" id="cloudmem"> 写入时同步云记忆（L6）
+        </label>
       </div>
       <div class="groups">
         <div class="group">
@@ -186,6 +213,7 @@ PAGE = """<!doctype html>
           <div class="row">
             <button class="act" data-act="doctor">体检</button>
             <button class="act" data-act="status">状态</button>
+            <button class="act" data-act="check">复查</button>
             <button class="act" data-act="dry">演练（不写盘）</button>
             <button class="act primary" data-act="apply">写入补丁</button>
             <button class="act primary" data-act="restart">关进程 → 写入 → 重启</button>
@@ -197,6 +225,7 @@ PAGE = """<!doctype html>
             <button class="act" data-act="gate-status">闸门状态</button>
             <button class="act danger" data-act="gate-on">gate on（全局）</button>
             <button class="act" data-act="gate-off">gate off</button>
+            <button class="act danger" data-act="gate-off-restart">gate off + 重启</button>
           </div>
         </div>
         <div class="group">
@@ -210,24 +239,26 @@ PAGE = """<!doctype html>
       <div class="term">
         <div class="term-head">
           <span>pojia.py · stdout</span>
+          <div id="hist"></div>
           <button class="term-clear" id="clear">清空</button>
         </div>
         <pre id="out"><span class="dim">就绪。正在体检…</span></pre>
       </div>
     </main>
-    <footer>写入类操作有二次确认 · restart / gate 会重启 WorkBuddy 进程（正在进行的会话随进程终止） · 幂等写入，自动备份 .pojia.bak</footer>
+    <footer>写入类操作有二次确认 · restart / gate 会重启 WorkBuddy 进程（正在进行的会话随进程终止） · 幂等写入，自动备份 .pojia.bak · 快捷键 <kbd>1</kbd>–<kbd>9</kbd> 执行前九个按钮 · 点终端头部胶囊回看历史输出</footer>
   </div>
 </div>
 <script>
   var OUT = document.getElementById('out');
   var CONFIRM = {
-    'apply':    '确认写入补丁？幂等，自动备份 .pojia.bak。',
-    'restart':  '确认执行？会先关闭 WorkBuddy——正在客户端里的对话会随进程终止。',
-    'revert':   '确认从 .pojia.bak 全部还原？',
-    'gate-on':  '确认开启 L3 闸门？全局放行，需重启 WorkBuddy 生效。',
-    'gate-off': '确认关闭 L3 闸门并还原 mjs 原版？'
+    'apply':            '确认写入补丁？幂等，自动备份 .pojia.bak。',
+    'restart':          '确认执行？会先关闭 WorkBuddy——正在客户端里的对话会随进程终止。',
+    'revert':           '确认从 .pojia.bak 全部还原？',
+    'gate-on':          '确认开启 L3 闸门？全局放行，需重启 WorkBuddy 生效。',
+    'gate-off':         '确认关闭 L3 闸门并还原 mjs 原版？',
+    'gate-off-restart': '确认关闭 L3 闸门并立刻重启 WorkBuddy？'
   };
-  var WRITE_ACTS = ['apply', 'restart', 'revert', 'gate-on', 'gate-off'];
+  var WRITE_ACTS = ['apply', 'restart', 'revert', 'gate-on', 'gate-off', 'gate-off-restart'];
 
   function esc(s){
     var d = document.createElement('div');
@@ -245,7 +276,33 @@ PAGE = """<!doctype html>
     el.className = 'badge' + (cls ? ' ' + cls : '');
   }
 
-  /* 解析 pojia status 输出 → 徽章（不使用正则，避免转义问题） */
+  /* ---------- 执行历史（localStorage，最近 8 条） ---------- */
+  var HIST = [];
+  try { HIST = JSON.parse(localStorage.getItem('pojia-hist') || '[]'); } catch (e) { HIST = []; }
+  function saveHist(){
+    try { localStorage.setItem('pojia-hist', JSON.stringify(HIST)); } catch (e) {}
+  }
+  function renderHist(){
+    var el = document.getElementById('hist');
+    el.innerHTML = HIST.map(function(h, i){
+      return '<button class="hpill" data-i="' + i + '" title="' + esc(h.t) + ' 回看输出">'
+           + esc(h.act) + (h.ok ? ' ✓' : ' ✗') + '</button>';
+    }).join('');
+  }
+  document.getElementById('hist').addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.hpill') : null;
+    if (!b) return;
+    var h = HIST[+b.getAttribute('data-i')];
+    if (!h) return;
+    OUT.innerHTML = '<span class="dim">[' + h.t + ']（历史回放）</span> '
+                   + '<span class="cmd">$ pojia ' + esc(h.act) + '</span> '
+                   + '<span class="' + (h.ok ? 'ok' : 'fail') + '">→ 退出码 ' + h.code + '</span>\\n'
+                   + '<span class="sep">──────────────────────────────</span>\\n'
+                   + esc(h.output || '(无输出)') + '\\n';
+    scrollDown();
+  });
+
+  /* ---------- status → 徽章 ---------- */
   function grabNum(line){
     var i = line.indexOf(':');
     if (i < 0) return '';
@@ -272,6 +329,28 @@ PAGE = """<!doctype html>
     }
   }
 
+  /* ---------- doctor → 环境摘要行 ---------- */
+  function parseDoctor(text){
+    var info = [];
+    var lines = text.split('\\n');
+    for (var i = 0; i < lines.length; i++){
+      var L = lines[i];
+      if (L.indexOf('Python') === 0){
+        info.push('Python ' + L.slice(L.indexOf(':') + 1).trim());
+      } else if (L.indexOf('node') === 0){
+        var nv = L.slice(L.indexOf(':') + 1).trim();
+        if (nv.indexOf('缺失') < 0) info.push('node ' + nv);
+      } else if (L.indexOf('写入权限') === 0){
+        info.push('写入' + (L.indexOf('OK') >= 0 ? '✓' : '✗'));
+      } else if (L.indexOf('进程') === 0){
+        info.push('WorkBuddy ' + (L.indexOf('运行中') >= 0 ? '运行中' : '未运行'));
+      }
+    }
+    var el = document.getElementById('envline');
+    el.textContent = info.join(' · ');
+    el.style.display = info.length ? '' : 'none';
+  }
+
   function post(action){
     return fetch('/api/run', {
       method: 'POST',
@@ -279,7 +358,8 @@ PAGE = """<!doctype html>
       body: JSON.stringify({
         action: action,
         install: document.getElementById('install').value,
-        data: document.getElementById('data').value
+        data: document.getElementById('data').value,
+        cloudmem: document.getElementById('cloudmem').checked
       })
     }).then(function(r){ return r.json(); });
   }
@@ -307,6 +387,11 @@ PAGE = """<!doctype html>
       OUT.innerHTML += '<span class="sep">──────────────────────────────</span>\\n';
       OUT.innerHTML += esc(j.output || '(无输出)') + '\\n';
       scrollDown();
+      HIST.unshift({t: t, act: act, code: j.code, ok: j.ok, output: (j.output || '').slice(0, 6000)});
+      if (HIST.length > 8) HIST.length = 8;
+      saveHist();
+      renderHist();
+      if (act === 'doctor') parseDoctor(j.output || '');
     }).catch(function(e){
       OUT.innerHTML = '';
       OUT.innerHTML += '<span class="fail">请求失败：' + esc(String(e)) + '</span>\\n';
@@ -324,9 +409,19 @@ PAGE = """<!doctype html>
     OUT.innerHTML = '<span class="dim">（已清空）</span>\\n';
   });
 
+  /* 数字快捷键 1-9：按 DOM 顺序执行前九个按钮 */
+  document.addEventListener('keydown', function(e){
+    if (e.target.tagName === 'INPUT') return;
+    var n = parseInt(e.key, 10);
+    if (isNaN(n) || n < 1 || n > 9) return;
+    var btns = document.querySelectorAll('button.act');
+    if (btns[n - 1] && !btns[n - 1].disabled) run(btns[n - 1].dataset.act);
+  });
+
+  renderHist();
   window.addEventListener('load', function(){
     refreshBadges().then(function(){
-      OUT.innerHTML = '<span class="dim">就绪。状态徽章已刷新，点上面任一按钮执行。</span>\\n';
+      OUT.innerHTML = '<span class="dim">就绪。状态徽章已刷新，点上面任一按钮执行，快捷键 1-9。</span>\\n';
     });
   });
 </script>
@@ -371,6 +466,7 @@ class Panel(http.server.BaseHTTPRequestHandler):
                 action,
                 str(req.get("install", "")).strip(),
                 str(req.get("data", "")).strip(),
+                bool(req.get("cloudmem", False)),
             )
             self._send(200, json.dumps(result), "application/json")
         except Exception as e:  # noqa: BLE001
